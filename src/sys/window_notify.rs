@@ -91,14 +91,36 @@ pub fn init(event: CGSEventType) -> i32 {
 /// Receiver for every event registered through [`init`]. Returns `None` once taken.
 pub fn take_receiver() -> Option<actor::Receiver<EventData>> { EVENT_CHANNEL.1.lock().take() }
 
+/// Window ids the reactor tracks; replaced on every reactor update.
+static TRACKED_WINDOW_IDS: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(Vec::new()));
+/// Window ids watched regardless of the reactor (the window server's menu bars).
+static PINNED_WINDOW_IDS: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(Vec::new()));
+
+/// `SLSRequestNotificationsForWindows` replaces the whole set, so every request
+/// carries both the reactor's windows and the pinned ones.
 pub fn update_window_notifications(window_ids: &[u32]) {
+    *TRACKED_WINDOW_IDS.lock() = window_ids.to_vec();
+    request_window_notifications();
+}
+
+pub fn set_pinned_window_notifications(window_ids: &[u32]) {
+    *PINNED_WINDOW_IDS.lock() = window_ids.to_vec();
+    request_window_notifications();
+}
+
+fn request_window_notifications() {
+    // Lock order: tracked, then pinned.
+    let ids = merge_notification_ids(&TRACKED_WINDOW_IDS.lock(), &PINNED_WINDOW_IDS.lock());
     unsafe {
-        let _ = SLSRequestNotificationsForWindows(
-            *G_CONNECTION,
-            window_ids.as_ptr(),
-            window_ids.len() as i32,
-        );
+        let _ = SLSRequestNotificationsForWindows(*G_CONNECTION, ids.as_ptr(), ids.len() as i32);
     }
+}
+
+fn merge_notification_ids(tracked: &[u32], pinned: &[u32]) -> Vec<u32> {
+    let mut ids: Vec<u32> = tracked.iter().chain(pinned).copied().collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 #[inline(always)]
@@ -282,5 +304,21 @@ extern "C" fn connection_callback(
 
     if let Err(e) = sender.try_send(event_data) {
         debug!("Failed to send event {kind}: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_notification_ids;
+
+    #[test]
+    fn pinned_ids_survive_tracked_updates() {
+        assert_eq!(merge_notification_ids(&[40, 12], &[26]), vec![12, 26, 40]);
+        assert_eq!(merge_notification_ids(&[], &[26]), vec![26]);
+    }
+
+    #[test]
+    fn duplicate_ids_are_requested_once() {
+        assert_eq!(merge_notification_ids(&[26, 12], &[26]), vec![12, 26]);
     }
 }

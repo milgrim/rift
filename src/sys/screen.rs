@@ -269,6 +269,46 @@ pub fn menu_bar_height(did: u32) -> f64 {
     height as f64
 }
 
+fn active_display_ids() -> Result<Vec<u32>, CGError> {
+    const MAX_SCREENS: usize = 64;
+    let mut ids: MaybeUninit<[CGDirectDisplayID; MAX_SCREENS]> = MaybeUninit::uninit();
+    let mut count: u32 = 0;
+    unsafe {
+        let err = CGGetActiveDisplayList(
+            MAX_SCREENS as u32,
+            ids.as_mut_ptr() as *mut CGDirectDisplayID,
+            &mut count,
+        );
+        if err != CGError::Success {
+            return Err(err);
+        }
+        Ok(std::slice::from_raw_parts(ids.as_ptr() as *const u32, count as usize).to_vec())
+    }
+}
+
+/// Bounds of every active display in Quartz global coordinates.
+pub fn active_display_bounds() -> Vec<(u32, CGRect)> {
+    active_display_ids()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|did| (did, CGDisplayBounds(did)))
+        .collect()
+}
+
+/// The display whose top edge the menu bar window is attached to, shown or slid above it.
+pub fn display_for_menu_bar(bar: CGRect, displays: &[(u32, CGRect)]) -> Option<u32> {
+    displays
+        .iter()
+        .find(|(_, display)| {
+            let overlaps_x = bar.origin.x < display.origin.x + display.size.width
+                && display.origin.x < bar.origin.x + bar.size.width;
+            let at_top = bar.origin.y >= display.origin.y - bar.size.height - 1.0
+                && bar.origin.y <= display.origin.y + 1.0;
+            overlaps_x && at_top
+        })
+        .map(|(did, _)| *did)
+}
+
 /// Displays whose menu bar an app has hidden for itself (e.g. non-native fullscreen).
 /// Maintained by `actor::menu_bar_watcher`.
 static APP_HIDDEN_MENU_BARS: Lazy<Mutex<HashSet<u32>>> =
@@ -486,23 +526,9 @@ pub struct Actual {
 #[allow(private_interfaces)]
 impl System for Actual {
     fn cg_screens(&self) -> Result<Vec<CGScreenInfo>, CGError> {
-        const MAX_SCREENS: usize = 64;
-        let mut ids: MaybeUninit<[CGDirectDisplayID; MAX_SCREENS]> = MaybeUninit::uninit();
-        let mut count: u32 = 0;
-        let ids = unsafe {
-            let err = CGGetActiveDisplayList(
-                MAX_SCREENS as u32,
-                ids.as_mut_ptr() as *mut CGDirectDisplayID,
-                &mut count,
-            );
-            if err != CGError::Success {
-                return Err(err);
-            }
-            std::slice::from_raw_parts(ids.as_ptr() as *const u32, count as usize)
-        };
-        Ok(ids
-            .iter()
-            .map(|&cg_id| CGScreenInfo {
+        Ok(active_display_ids()?
+            .into_iter()
+            .map(|cg_id| CGScreenInfo {
                 cg_id: ScreenId(cg_id),
                 bounds: CGDisplayBounds(cg_id),
             })
@@ -834,6 +860,58 @@ mod test {
     #[test]
     fn system_auto_hide_wins_over_app_hidden() {
         assert_eq!(super::menu_bar_inset(true, true, 38.0, 38.0), 38.0);
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> CGRect {
+        CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))
+    }
+
+    #[test]
+    fn menu_bar_matches_the_display_it_sits_on() {
+        let displays = [
+            (1, rect(0.0, 0.0, 1920.0, 1243.0)),
+            (2, rect(1920.0, 0.0, 2560.0, 1440.0)),
+        ];
+        assert_eq!(
+            super::display_for_menu_bar(rect(0.0, 0.0, 1920.0, 38.0), &displays),
+            Some(1)
+        );
+        assert_eq!(
+            super::display_for_menu_bar(rect(1920.0, 0.0, 2560.0, 25.0), &displays),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn hidden_menu_bar_matches_its_display() {
+        let displays = [(1, rect(0.0, 0.0, 1920.0, 1243.0))];
+        assert_eq!(
+            super::display_for_menu_bar(rect(0.0, -38.0, 1920.0, 38.0), &displays),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn hidden_menu_bar_of_lower_display_matches_lower_display() {
+        // Upper display 0..1243, lower display starts at y=1243. The lower display's
+        // hidden menu bar lies inside the upper display's area.
+        let displays = [
+            (1, rect(0.0, 0.0, 1920.0, 1243.0)),
+            (2, rect(0.0, 1243.0, 1920.0, 1080.0)),
+        ];
+        assert_eq!(
+            super::display_for_menu_bar(rect(0.0, 1243.0 - 25.0, 1920.0, 25.0), &displays),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn menu_bar_far_from_any_display_top_matches_nothing() {
+        let displays = [(1, rect(0.0, 0.0, 1920.0, 1243.0))];
+        assert_eq!(
+            super::display_for_menu_bar(rect(0.0, 600.0, 1920.0, 38.0), &displays),
+            None
+        );
     }
 
     #[test]

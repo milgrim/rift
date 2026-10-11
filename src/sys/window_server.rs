@@ -16,7 +16,7 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGError, CGWindowID, CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID,
-    kCGWindowLayer, kCGWindowName, kCGWindowOwnerName,
+    kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName,
 };
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
@@ -411,6 +411,36 @@ pub fn mission_control_dock_overlay_visible() -> bool {
 
             get_num(&window, unsafe { kCGWindowLayer }) == Some(MISSION_CONTROL_DOCK_LAYER)
         })
+}
+
+/// The window server's menu bar windows (one per display) with their current bounds.
+///
+/// Matched by owner and the main-menu window level rather than by name, because
+/// window names can require Screen Recording permission.
+pub fn menu_bar_windows() -> Vec<(WindowServerId, CGRect)> {
+    const MAIN_MENU_WINDOW_LAYER: i64 = 24;
+
+    get_windows_raw::<CFDictionary<CFString, CFType>>(
+        CGWindowListOption::OptionAll,
+        kCGNullWindowID,
+    )
+    .iter()
+    .filter(|window| {
+        get_string(window, unsafe { kCGWindowOwnerName }).as_deref() == Some("Window Server")
+            && get_num(window, unsafe { kCGWindowLayer }) == Some(MAIN_MENU_WINDOW_LAYER)
+    })
+    .filter_map(|window| get_num(&window, unsafe { kCGWindowNumber }))
+    .filter_map(|number| {
+        let id = WindowServerId::new(u32::try_from(number).ok()?);
+        Some((id, window_bounds(id)?))
+    })
+    .collect()
+}
+
+pub fn window_bounds(id: WindowServerId) -> Option<CGRect> {
+    let query = WindowIterator::new(&[id])?;
+    query.advance()?;
+    Some(query.bounds())
 }
 
 pub fn window_parent(id: WindowServerId) -> Option<WindowServerId> {

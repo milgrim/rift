@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, trace, warn};
 
 use super::reactor::{self, Event};
-use super::spaces;
+use super::{menu_bar_watcher, spaces};
 use crate::actor::app::WindowId;
 use crate::actor::reactor::Requested;
 use crate::common::collections::{HashMap, HashSet};
@@ -325,8 +325,15 @@ impl Dispatcher {
                     );
                 }
             }
-            CGSEventType::Known(KnownCGSEvent::WindowMoved)
-            | CGSEventType::Known(KnownCGSEvent::WindowResized) => {
+            CGSEventType::Known(KnownCGSEvent::WindowMoved) => {
+                // Moves are subscribed only for the menu bar watcher. App window moves
+                // arrive here too (the window list is shared) and are dropped before
+                // any window-server query; their frames are tracked through AX.
+                if let Some(window_id) = evt.window_id {
+                    menu_bar_watcher::on_window_moved(WindowServerId::new(window_id));
+                }
+            }
+            CGSEventType::Known(KnownCGSEvent::WindowResized) => {
                 // TODO: suppress move/resize while Mission Control is active
                 let mouse_state = event::get_mouse_state();
                 let Some(window_id) = evt.window_id else {

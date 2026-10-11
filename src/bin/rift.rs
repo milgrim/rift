@@ -313,11 +313,13 @@ Enable it in System Settings > Desktop & Dock (Mission Control) and restart Rift
             CGSEventType::Known(KnownCGSEvent::WindowManagerGlobalFrontConnectionChanged),
             CGSEventType::Known(KnownCGSEvent::SpaceCreated),
             CGSEventType::Known(KnownCGSEvent::SpaceDestroyed),
-            //CGSEventType::Known(KnownCGSEvent::WindowMoved),
+            // Only consumed by the menu bar watcher; app window moves are dropped.
+            CGSEventType::Known(KnownCGSEvent::WindowMoved),
             //CGSEventType::Known(KnownCGSEvent::WindowResized),
         ],
         Some(window_tx_store.clone()),
     );
+    rift_wm::actor::menu_bar_watcher::init(spaces_tx.clone());
 
     let notification_center =
         NotificationCenter::new(wm_controller_sender.clone(), spaces_tx.clone());

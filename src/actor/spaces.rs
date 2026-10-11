@@ -551,6 +551,11 @@ impl SpacesActor {
     ) -> bool {
         self.state.last_converter = converter;
         let forwarded = self.build_forwarded_state(screens);
+        // Menu bar windows are per display; re-match them after a topology change.
+        #[cfg(not(test))]
+        if forwarded.display_set_changed {
+            crate::actor::menu_bar_watcher::rediscover();
+        }
         self.state.last_sent_spaces =
             Some(forwarded.screens.iter().map(|screen| screen.space).collect());
         self.state.awaiting_space_switch_confirmation = false;

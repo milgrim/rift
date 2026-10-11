@@ -11,6 +11,8 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{CGDisplayBounds, CGError, CGGetActiveDisplayList, CGMainDisplayID};
 use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, ns_string};
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
@@ -22,7 +24,7 @@ use super::skylight::{
     SLSCopyActiveMenuBarDisplayIdentifier, SLSGetDisplayMenubarHeight, SLSGetDockRectWithReason,
     SLSGetMenuBarAutohideEnabled, SLSGetSpaceManagementMode,
 };
-use crate::common::collections::HashMap;
+use crate::common::collections::{HashMap, HashSet};
 use crate::sys::geometry::CGRectDef;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -267,11 +269,32 @@ pub fn menu_bar_height(did: u32) -> f64 {
     height as f64
 }
 
-fn menu_bar_inset(hidden: bool, height: f64, notch_height: f64) -> f64 {
+/// Displays whose menu bar an app has hidden for itself (e.g. non-native fullscreen).
+/// Maintained by `actor::menu_bar_watcher`.
+static APP_HIDDEN_MENU_BARS: Lazy<Mutex<HashSet<u32>>> =
+    Lazy::new(|| Mutex::new(HashSet::default()));
+
+/// Records whether an app has hidden the menu bar on `did`. Returns true when it changed.
+pub fn set_menu_bar_app_hidden(did: u32, hidden: bool) -> bool {
+    let mut displays = APP_HIDDEN_MENU_BARS.lock();
     if hidden {
+        displays.insert(did)
+    } else {
+        displays.remove(&did)
+    }
+}
+
+fn menu_bar_app_hidden(did: u32) -> bool { APP_HIDDEN_MENU_BARS.lock().contains(&did) }
+
+fn menu_bar_inset(system_hidden: bool, app_hidden: bool, height: f64, notch_height: f64) -> f64 {
+    if system_hidden {
         // An auto-hidden menu bar does not reserve space on displays without a notch.
         // Notched built-in displays must retain their safe-area inset.
         notch_height
+    } else if app_hidden {
+        // The frontmost app hid the menu bar to use the whole display, notch strip
+        // included; tile the same area so its window is not pushed down.
+        0.0
     } else {
         // macOS reports the menubar height without the topmost usable pixel; add 1 to
         // avoid leaving a dead strip or placing windows under the bar.
@@ -333,7 +356,12 @@ fn rects_intersect(a: &CGRect, b: &CGRect) -> bool {
 fn constrain_display_bounds(did: u32, raw: CGRect, notch_height: f64) -> CGRect {
     let mut frame = raw;
 
-    let menu_bar_inset = menu_bar_inset(menu_bar_hidden(), menu_bar_height(did), notch_height);
+    let menu_bar_inset = menu_bar_inset(
+        menu_bar_hidden(),
+        menu_bar_app_hidden(did),
+        menu_bar_height(did),
+        notch_height,
+    );
     if menu_bar_inset > 0.0 {
         frame.origin.y += menu_bar_inset;
         frame.size.height = (frame.size.height - menu_bar_inset).max(0.0);
@@ -785,17 +813,37 @@ mod test {
 
     #[test]
     fn auto_hidden_menu_bar_does_not_inset_a_display_without_a_notch() {
-        assert_eq!(super::menu_bar_inset(true, 24.0, 0.0), 0.0);
+        assert_eq!(super::menu_bar_inset(true, false, 24.0, 0.0), 0.0);
     }
 
     #[test]
     fn auto_hidden_menu_bar_preserves_the_notch_safe_area() {
-        assert_eq!(super::menu_bar_inset(true, 37.0, 32.0), 32.0);
+        assert_eq!(super::menu_bar_inset(true, false, 37.0, 32.0), 32.0);
     }
 
     #[test]
     fn visible_menu_bar_reserves_its_reported_height() {
-        assert_eq!(super::menu_bar_inset(false, 24.0, 0.0), 25.0);
+        assert_eq!(super::menu_bar_inset(false, false, 24.0, 0.0), 25.0);
+    }
+
+    #[test]
+    fn app_hidden_menu_bar_uses_the_full_display_including_the_notch() {
+        assert_eq!(super::menu_bar_inset(false, true, 38.0, 38.0), 0.0);
+    }
+
+    #[test]
+    fn system_auto_hide_wins_over_app_hidden() {
+        assert_eq!(super::menu_bar_inset(true, true, 38.0, 38.0), 38.0);
+    }
+
+    #[test]
+    fn app_hidden_registry_reports_changes() {
+        // Display ids far outside the real range so parallel tests don't collide.
+        assert!(super::set_menu_bar_app_hidden(0xF000_0001, true));
+        assert!(!super::set_menu_bar_app_hidden(0xF000_0001, true));
+        assert!(super::menu_bar_app_hidden(0xF000_0001));
+        assert!(super::set_menu_bar_app_hidden(0xF000_0001, false));
+        assert!(!super::menu_bar_app_hidden(0xF000_0001));
     }
 
     struct Stub {

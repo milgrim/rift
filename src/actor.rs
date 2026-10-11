@@ -9,6 +9,7 @@ pub mod drag;
 pub mod gesture;
 pub mod input;
 pub mod menu_bar;
+pub mod menu_bar_watcher;
 pub mod mission_control;
 pub mod mission_control_observer;
 pub mod notification_center;
